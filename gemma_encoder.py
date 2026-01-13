@@ -95,19 +95,22 @@ def get_text_encoder_path(model_name: str):
     # Get the primary path from folder_paths
     primary_path = folder_paths.get_full_path("text_encoders", model_name)
     
-    # Extract the directory part
-    primary_dir = os.path.dirname(primary_path) if os.path.isfile(primary_path) else primary_path
-    
-    # If path contains ssd_models, try fallback first
-    if "ssd_models" in primary_dir:
+    # If path contains ssd_models, try fallback first (even if primary exists)
+    if "ssd_models" in primary_path:
+        # Extract the text_encoders directory (parent of the model directory)
+        primary_dir = os.path.dirname(primary_path)
         fallback_dir = get_fallback_text_encoders_dir(primary_dir)
+        
         if fallback_dir and os.path.exists(fallback_dir):
             fallback_path = os.path.join(fallback_dir, model_name)
-            if os.path.exists(fallback_path):
-                logger.info(f"Using text encoder model from fallback location: {fallback_path}")
-                return fallback_path
+            logger.info(f"Using text encoder model from fallback location: {fallback_path}")
+            return fallback_path
     
-    # Return original path
+    # If the file/directory exists at the primary path, use it
+    if os.path.exists(primary_path):
+        return primary_path
+    
+    # Return original path (will raise error if file doesn't exist)
     return primary_path
 
 PREFIX_BASE = "model.diffusion_model."
