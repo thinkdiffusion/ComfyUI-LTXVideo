@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +26,89 @@ from .embeddings_connector import Embeddings1DConnector
 from .nodes_registry import comfy_node
 
 logger = logging.getLogger(__name__)
+
+def get_fallback_text_encoders_dir(primary_dir: str):
+    """Get fallback text_encoders directory if primary doesn't exist or has no models
+    
+    Args:
+        primary_dir: Primary text_encoders directory path
+        
+    Returns:
+        Fallback directory path or None
+    """
+    # Check if primary is in ssd_models, then fallback to comfyui-gpu-*/models/text_encoders
+    if "ssd_models" in primary_dir:
+        import re
+        
+        # Extract the base path before ssd_models
+        base_path = primary_dir.split("ssd_models")[0]
+        
+        # Try to find any comfyui-gpu-* directory
+        if os.path.exists(base_path):
+            try:
+                # List directories and look for comfyui-gpu-* or comfyui-cpu-* patterns
+                for item in os.listdir(base_path):
+                    item_path = os.path.join(base_path, item)
+                    if os.path.isdir(item_path):
+                        # Check for comfyui-gpu-* pattern (e.g., comfyui-gpu-9000, comfyui-gpu-9100)
+                        if re.match(r'^comfyui-gpu-\d+$', item):
+                            fallback_dir = primary_dir.replace("ssd_models", f"{item}/models")
+                            if os.path.exists(fallback_dir):
+                                logger.info(f"Using fallback text_encoders directory: {fallback_dir}")
+                                return fallback_dir
+                
+                # If no GPU directory found, try CPU directories
+                for item in os.listdir(base_path):
+                    item_path = os.path.join(base_path, item)
+                    if os.path.isdir(item_path):
+                        # Check for comfyui-cpu-* pattern (e.g., comfyui-cpu-9000, comfyui-cpu-9100)
+                        if re.match(r'^comfyui-cpu-\d+$', item):
+                            fallback_dir = primary_dir.replace("ssd_models", f"{item}/models")
+                            if os.path.exists(fallback_dir):
+                                logger.info(f"Using fallback text_encoders directory: {fallback_dir}")
+                                return fallback_dir
+            except (PermissionError, OSError):
+                pass
+        
+        # Fallback to original hardcoded paths if pattern matching fails
+        fallback_dir = primary_dir.replace("ssd_models", "comfyui-gpu-9000/models")
+        if os.path.exists(fallback_dir):
+            logger.info(f"Using fallback text_encoders directory: {fallback_dir}")
+            return fallback_dir
+        
+        fallback_dir = primary_dir.replace("ssd_models", "comfyui-cpu-9000/models")
+        if os.path.exists(fallback_dir):
+            logger.info(f"Using fallback text_encoders directory: {fallback_dir}")
+            return fallback_dir
+    
+    return None
+
+def get_text_encoder_path(model_name: str):
+    """Get text_encoder model path with fallback support for ssd_models
+    
+    Args:
+        model_name: Name of the text encoder model/folder
+        
+    Returns:
+        Full path to the text encoder model directory
+    """
+    # Get the primary path from folder_paths
+    primary_path = folder_paths.get_full_path("text_encoders", model_name)
+    
+    # Extract the directory part
+    primary_dir = os.path.dirname(primary_path) if os.path.isfile(primary_path) else primary_path
+    
+    # If path contains ssd_models, try fallback first
+    if "ssd_models" in primary_dir:
+        fallback_dir = get_fallback_text_encoders_dir(primary_dir)
+        if fallback_dir and os.path.exists(fallback_dir):
+            fallback_path = os.path.join(fallback_dir, model_name)
+            if os.path.exists(fallback_path):
+                logger.info(f"Using text encoder model from fallback location: {fallback_path}")
+                return fallback_path
+    
+    # Return original path
+    return primary_path
 
 PREFIX_BASE = "model.diffusion_model."
 
@@ -566,7 +650,7 @@ class LTXVGemmaCLIPModelLoader:
     OUTPUT_NODE = False
 
     def load_model(self, gemma_path: str, ltxv_path: str, max_length: int):
-        path = Path(folder_paths.get_full_path("text_encoders", gemma_path))
+        path = Path(get_text_encoder_path(gemma_path))
         model_root = path.parents[1]
         tokenizer_path = Path(find_matching_dir(model_root, "tokenizer.model"))
         gemma_model_path = Path(find_matching_dir(model_root, "model*.safetensors"))
