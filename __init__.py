@@ -1,3 +1,5 @@
+from .conditioning_loader import LTXVLoadConditioning
+from .conditioning_saver import LTXVSaveConditioning
 from .decoder_noise import DecoderNoise
 from .dynamic_conditioning import DynamicConditioning
 from .easy_samplers import (
@@ -5,10 +7,13 @@ from .easy_samplers import (
     LTXVBaseSampler,
     LTXVExtendSampler,
     LTXVInContextSampler,
+    LTXVNormalizingSampler,
 )
+from .gemma_api_conditioning import GemmaAPITextEncode
 from .gemma_encoder import LTXVGemmaCLIPModelLoader, LTXVGemmaEnhancePrompt
 from .guide import LTXVAddGuideAdvanced
 from .guiders import GuiderParametersNode, MultimodalGuiderNode
+from .iclora import LTXAddVideoICLoRAGuide, LTXICLoRALoaderModelOnly
 from .latent_norm import (
     LTXVAdainLatent,
     LTXVPerStepAdainPatcher,
@@ -61,6 +66,7 @@ NODE_CLASS_MAPPINGS = {
     "LTXVBaseSampler": LTXVBaseSampler,
     "LTXVInContextSampler": LTXVInContextSampler,
     "LTXVExtendSampler": LTXVExtendSampler,
+    "LTXVNormalizingSampler": LTXVNormalizingSampler,
     "LTXVPreprocessMasks": LTXVPreprocessMasks,
     "LTXVPatcherVAE": LTXVPatcherVAE,
     "LTXVPromptEnhancer": LTXVPromptEnhancer,
@@ -83,10 +89,15 @@ NODE_CLASS_MAPPINGS = {
     "LTXVPerStepStatNormPatcher": LTXVPerStepStatNormPatcher,
     "LTXVGemmaCLIPModelLoader": LTXVGemmaCLIPModelLoader,
     "LTXVGemmaEnhancePrompt": LTXVGemmaEnhancePrompt,
+    "GemmaAPITextEncode": GemmaAPITextEncode,
     "DynamicConditioning": DynamicConditioning,
     "LowVRAMCheckpointLoader": LowVRAMCheckpointLoader,
     "LowVRAMAudioVAELoader": LowVRAMAudioVAELoader,
     "LowVRAMLatentUpscaleModelLoader": LowVRAMLatentUpscaleModelLoader,
+    "LTXAddVideoICLoRAGuide": LTXAddVideoICLoRAGuide,
+    "LTXICLoRALoaderModelOnly": LTXICLoRALoaderModelOnly,
+    "LTXVLoadConditioning": LTXVLoadConditioning,
+    "LTXVSaveConditioning": LTXVSaveConditioning,
 }
 
 # Consistent display names between static and dynamic node mappings in nodes_registry.py,

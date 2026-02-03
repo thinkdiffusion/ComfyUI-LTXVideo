@@ -64,7 +64,6 @@ class MultimodalGuider(comfy.samplers.CFGGuider):
         self,
         run_vx: bool,
         run_ax: bool,
-        audio_length: int,
         audio_ptb: bool,
         video_ptb: bool,
     ):
@@ -72,7 +71,7 @@ class MultimodalGuider(comfy.samplers.CFGGuider):
         num_self_attns = 0
         if run_vx:
             num_self_attns += 1
-        if run_ax and audio_length > 0:
+        if run_ax:
             num_self_attns += 1
 
         video_attn_idx = 0
@@ -85,6 +84,20 @@ class MultimodalGuider(comfy.samplers.CFGGuider):
 
         return list(stg_indexes)
 
+    def unpack_latents(self, x: torch.Tensor):
+        latent_shapes = (
+            self.conds.get("positive", {})[0]
+            .get("model_conds", {})
+            .get("latent_shapes", None)
+            .cond
+        )
+        vx, ax = comfy.utils.unpack_latents(x, latent_shapes)
+        return vx, ax
+
+    def pack_latents(self, vx: torch.Tensor, ax: torch.Tensor):
+        x, latent_shapes = comfy.utils.pack_latents([vx, ax])
+        return x, latent_shapes
+
     def predict_noise(
         self,
         x: torch.Tensor,
@@ -92,7 +105,6 @@ class MultimodalGuider(comfy.samplers.CFGGuider):
         model_options: dict = {},
         seed=None,
     ):
-        x_shape = x.shape
         # in CFGGuider.predict_noise, we call sampling_function(), which uses cfg_function() to compute pos & neg
         # but we'd rather do a single batch of sampling pos, neg, and perturbed, so we call calc_cond_batch([perturbed,pos,neg]) directly
         current_step = self.current_step
@@ -108,23 +120,18 @@ class MultimodalGuider(comfy.samplers.CFGGuider):
             Modality.VIDEO.value, GuiderParameters()
         )
 
-        audio_length = model_options["transformer_options"].get("audio_length", 0)
-
         run_vx = not video_params.do_skip(current_step)
         run_ax = not audio_params.do_skip(current_step)
         run_a2v = video_params.do_cross_attn(current_step)
         run_v2a = audio_params.do_cross_attn(current_step)
 
-        vx, ax = self.inner_model.diffusion_model.separate_audio_and_video_latents(
-            x, audio_length
-        )
+        vx, ax = self.unpack_latents(x)
         if not run_vx:
             vx = self.last_denoised_v
         if not run_ax:
             ax = self.last_denoised_a
-        x = self.inner_model.diffusion_model.recombine_audio_and_video_latents(
-            vx, ax, x_shape
-        )
+        x, _ = self.pack_latents(vx, ax)
+
         if not run_vx and not run_ax:
             return x
 
@@ -145,11 +152,7 @@ class MultimodalGuider(comfy.samplers.CFGGuider):
             del model_options["transformer_options"]["run_ax"]
             del model_options["transformer_options"]["a2v_cross_attn"]
             del model_options["transformer_options"]["v2a_cross_attn"]
-        v_noise_pred_pos, a_noise_pred_pos = (
-            self.inner_model.diffusion_model.separate_audio_and_video_latents(
-                noise_pred_pos, audio_length
-            )
-        )
+        v_noise_pred_pos, a_noise_pred_pos = self.unpack_latents(noise_pred_pos)
 
         a_noise_pred_neg, v_noise_pred_neg = 0, 0
         a_noise_pred_perturbed, v_noise_pred_perturbed = 0, 0
@@ -168,11 +171,7 @@ class MultimodalGuider(comfy.samplers.CFGGuider):
                     timestep,
                     model_options,
                 )[0]
-                v_noise_pred_neg, a_noise_pred_neg = (
-                    self.inner_model.diffusion_model.separate_audio_and_video_latents(
-                        noise_pred_neg, audio_length
-                    )
-                )
+                v_noise_pred_neg, a_noise_pred_neg = self.unpack_latents(noise_pred_neg)
             finally:
                 del model_options["transformer_options"]["run_vx"]
                 del model_options["transformer_options"]["run_ax"]
@@ -183,8 +182,7 @@ class MultimodalGuider(comfy.samplers.CFGGuider):
             try:
                 stg_indexes = self.calc_stg_indexes(
                     run_vx,
-                    run_ax,
-                    audio_length,
+                    run_ax and ax.numel() > 0,
                     audio_params.perturb_attn,
                     video_params.perturb_attn,
                 )
@@ -202,10 +200,8 @@ class MultimodalGuider(comfy.samplers.CFGGuider):
                     timestep,
                     model_options,
                 )[0]
-                v_noise_pred_perturbed, a_noise_pred_perturbed = (
-                    self.inner_model.diffusion_model.separate_audio_and_video_latents(
-                        noise_pred_perturbed, audio_length
-                    )
+                v_noise_pred_perturbed, a_noise_pred_perturbed = self.unpack_latents(
+                    noise_pred_perturbed
                 )
             finally:
                 self.stg_flag.do_skip = False
@@ -229,10 +225,8 @@ class MultimodalGuider(comfy.samplers.CFGGuider):
                     timestep,
                     model_options,
                 )[0]
-                v_noise_pred_modality, a_noise_pred_modality = (
-                    self.inner_model.diffusion_model.separate_audio_and_video_latents(
-                        noise_pred_modality, audio_length
-                    )
+                v_noise_pred_modality, a_noise_pred_modality = self.unpack_latents(
+                    noise_pred_modality
                 )
             finally:
                 del model_options["transformer_options"]["a2v_cross_attn"]
@@ -260,9 +254,7 @@ class MultimodalGuider(comfy.samplers.CFGGuider):
         else:
             ax = self.last_denoised_a
 
-        x = self.inner_model.diffusion_model.recombine_audio_and_video_latents(
-            vx, ax, x_shape
-        )
+        x, _ = self.pack_latents(vx, ax)
 
         # normally this would be done in cfg_function, but we skipped
         # that for efficiency: we can compute the noise predictions in
@@ -285,11 +277,7 @@ class MultimodalGuider(comfy.samplers.CFGGuider):
             }
             x = fn(args)
 
-        self.last_denoised_v, self.last_denoised_a = (
-            self.inner_model.diffusion_model.separate_audio_and_video_latents(
-                x, audio_length
-            )
-        )
+        self.last_denoised_v, self.last_denoised_a = self.unpack_latents(x)
         return x
 
 
