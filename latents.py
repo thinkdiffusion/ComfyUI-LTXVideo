@@ -438,6 +438,9 @@ class LTXVAddLatentGuide:
         latent = latent["samples"]
         guide = guiding_latent["samples"]
 
+        # Record original (pre-dilation) guide latent shape for spatial mask downsampling
+        guide_orig_shape = list(guide.shape[2:])  # [F, H_small, W_small]
+
         assert (
             latent.shape[4] % guide.shape[4] == 0
             and latent.shape[3] % guide.shape[3] == 0
@@ -451,6 +454,10 @@ class LTXVAddLatentGuide:
 
         guide = guiding_latent["samples"]
         guide_mask = guiding_latent.get("noise_mask", None)
+
+        # Pre-filter token count = product of dilated spatial dims
+        # (before grid_mask filtering removes padding positions)
+        iclora_tokens_added = guide.shape[2] * guide.shape[3] * guide.shape[4]
 
         scale_factors = vae.downscale_index_formula
 
@@ -469,6 +476,16 @@ class LTXVAddLatentGuide:
             strength=strength,
             scale_factors=scale_factors,
             guide_mask=guide_mask,
+        )
+
+        # Track this guide in guide_attention_entries for per-reference attention control.
+        from .iclora_attention import append_guide_attention_entry
+
+        positive = append_guide_attention_entry(
+            positive, iclora_tokens_added, guide_orig_shape
+        )
+        negative = append_guide_attention_entry(
+            negative, iclora_tokens_added, guide_orig_shape
         )
 
         return (
@@ -808,6 +825,18 @@ class LTXVSetAudioVideoMaskByTime:
             audio_mask[
                 :, :, audio_latent_frame_index_start:audio_latent_frame_index_end
             ] = 1.0
+
+        if "noise_mask" in av_latent:
+            base_mask = av_latent["noise_mask"].tensors[0].clone()
+            if (
+                base_mask.shape[0]
+                == base_mask.shape[1]
+                == 1
+                == base_mask.shape[3]
+                == base_mask.shape[4]
+            ):
+                for frame in range(base_mask.shape[2]):
+                    video_mask[:, :, frame, :, :] *= base_mask[0, 0, frame, 0, 0]
 
         av_latent["noise_mask"] = NestedTensor(
             ltxav.recombine_audio_and_video_latents(video_mask, audio_mask)
