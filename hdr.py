@@ -79,6 +79,21 @@ def _linear_to_srgb(x: Tensor) -> Tensor:
     ).clamp(0.0, 1.0)
 
 
+def _allocate_unique_exr_path(output_dir: str, filename: str) -> tuple[str, str]:
+    """Pick a writable path under ``output_dir``; if ``filename`` exists, use ``stem (n).exr``."""
+    path = os.path.join(output_dir, filename)
+    if not os.path.exists(path):
+        return path, filename
+    stem, ext = os.path.splitext(filename)
+    n = 1
+    while True:
+        alt_name = f"{stem} ({n}){ext}"
+        path = os.path.join(output_dir, alt_name)
+        if not os.path.exists(path):
+            return path, alt_name
+        n += 1
+
+
 # ---------------------------------------------------------------------------
 # ComfyUI Node
 # ---------------------------------------------------------------------------
@@ -263,8 +278,8 @@ class LTXVHDRDecodePostprocess:
         ui_images: list = []
         for i in range(frames.shape[0]):
             frame_bgr = frames[i][:, :, ::-1].astype(np.float32).copy()
-            fname = f"{filename_prefix}_{i:05d}.exr"
-            path = os.path.join(output_dir, fname)
+            desired = f"{filename_prefix}_{i:05d}.exr"
+            path, fname = _allocate_unique_exr_path(output_dir, desired)
             cv2.imwrite(path, frame_bgr, params)
             if under_output:
                 ui_images.append(
