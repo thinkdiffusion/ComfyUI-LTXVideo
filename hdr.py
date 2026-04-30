@@ -131,7 +131,7 @@ class LTXVHDRDecodePostprocess:
                 "output_dir": (
                     "STRING",
                     {
-                        "default": "output/hdr_exr",
+                        "default": "#outputs/hdr_exr",
                         "tooltip": (
                             "Directory for EXR frames (relative to ComfyUI "
                             "output directory, or absolute path)."
@@ -173,7 +173,7 @@ class LTXVHDRDecodePostprocess:
         image: torch.Tensor,
         exposure: float = 0.0,
         save_exr: bool = False,
-        output_dir: str = "output/hdr_exr",
+        output_dir: str = "#outputs/hdr_exr",
         filename_prefix: str = "frame",
         half_precision: bool = True,
     ) -> tuple:
@@ -216,8 +216,16 @@ class LTXVHDRDecodePostprocess:
         import folder_paths
         import numpy as np
 
+        base_output_dir = os.path.abspath(folder_paths.get_output_directory())
         if not os.path.isabs(output_dir):
-            output_dir = os.path.join(folder_paths.get_output_directory(), output_dir)
+            normalized = output_dir.replace("\\", "/").strip().lstrip("/")
+            if normalized == "#outputs":
+                normalized = ""
+            elif normalized.startswith("#outputs/"):
+                normalized = normalized[len("#outputs/") :]
+            output_dir = os.path.join(base_output_dir, normalized)
+        else:
+            output_dir = os.path.abspath(output_dir)
 
         os.makedirs(output_dir, exist_ok=True)
 
