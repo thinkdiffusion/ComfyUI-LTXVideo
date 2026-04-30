@@ -91,8 +91,10 @@ class LTXVHDRDecodePostprocess:
     Place after VAE Decode in an HDR IC-LoRA workflow. Recovers linear HDR
     values from the compressed latent space and tonemaps them to SDR for
     display. When ``save_exr`` is enabled, also writes the raw linear HDR
-    frames as an EXR image sequence.
-    make sure to set OPENCV_IO_ENABLE_OPENEXR=1 environment in the command line  # Must be set before cv2 import
+    frames as an EXR image sequence and reports them via ``ui.exr`` (same
+    metadata shape as Save Image, but not ``ui.images``) so ``executed`` lists
+    files for integrations without triggering the image preview widget.
+    Set OPENCV_IO_ENABLE_OPENEXR=1 before starting ComfyUI (before cv2 import).
 
 
     Outputs:
@@ -176,7 +178,7 @@ class LTXVHDRDecodePostprocess:
         output_dir: str = "output/hdr_exr",
         filename_prefix: str = "frame",
         half_precision: bool = True,
-    ) -> tuple:
+    ) -> tuple | dict:
 
         hdr = _hdr_decompress(image)
         hdr = torch.clamp(hdr, min=0.0, max=1e4)
@@ -193,7 +195,14 @@ class LTXVHDRDecodePostprocess:
                 "To enable it, set the environment variable OPENCV_IO_ENABLE_OPENEXR=1 before starting ComfyUI, then restart. "
                 "Alternatively, disable EXR output or switch to PNG/JPG."
             )
-            self._save_exr_frames(hdr, output_dir, filename_prefix, half_precision)
+            ui_images = self._save_exr_frames(
+                hdr, output_dir, filename_prefix, half_precision
+            )
+            if ui_images:
+                return {
+                    "result": (tonemapped, hdr),
+                    "ui": {"exr": ui_images},
+                }
 
         return (tonemapped, hdr)
 
@@ -203,7 +212,8 @@ class LTXVHDRDecodePostprocess:
         output_dir: str,
         filename_prefix: str,
         half_precision: bool,
-    ) -> None:
+    ) -> list:
+        """Write EXR sequence; return SaveImage-style entries for ``executed`` / UI."""
         try:
             import cv2
         except ImportError:
@@ -211,13 +221,31 @@ class LTXVHDRDecodePostprocess:
                 "opencv-python is required for EXR export. "
                 "Install with: pip install opencv-python"
             )
-            return
+            return []
 
         import folder_paths
         import numpy as np
 
+        output_root = folder_paths.get_output_directory()
         if not os.path.isabs(output_dir):
-            output_dir = os.path.join(folder_paths.get_output_directory(), output_dir)
+            output_dir = os.path.join(output_root, output_dir)
+        output_dir = os.path.normpath(os.path.abspath(output_dir))
+
+        out_root_abs = os.path.normpath(os.path.abspath(output_root))
+        try:
+            under_output = os.path.commonpath([out_root_abs, output_dir]) == out_root_abs
+        except ValueError:
+            under_output = False
+        if under_output:
+            rel = os.path.relpath(output_dir, out_root_abs)
+            subfolder = "" if rel in (".", "") else rel.replace(os.sep, "/")
+        else:
+            subfolder = ""
+            logger.warning(
+                "EXR output directory is outside ComfyUI's output folder (%s); "
+                "files are saved but omitted from ui/executed (use a path under the output directory for integrations).",
+                out_root_abs,
+            )
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -232,10 +260,16 @@ class LTXVHDRDecodePostprocess:
             cv2.IMWRITE_EXR_COMPRESSION_ZIP,
         ]
 
+        ui_images: list = []
         for i in range(frames.shape[0]):
             frame_bgr = frames[i][:, :, ::-1].astype(np.float32).copy()
-            path = os.path.join(output_dir, f"{filename_prefix}_{i:05d}.exr")
+            fname = f"{filename_prefix}_{i:05d}.exr"
+            path = os.path.join(output_dir, fname)
             cv2.imwrite(path, frame_bgr, params)
+            if under_output:
+                ui_images.append(
+                    {"filename": fname, "subfolder": subfolder, "type": "output"}
+                )
 
         logger.info(
             "Saved %d EXR frame(s) to %s (%s)",
@@ -243,3 +277,4 @@ class LTXVHDRDecodePostprocess:
             output_dir,
             "float16" if half_precision else "float32",
         )
+        return ui_images
