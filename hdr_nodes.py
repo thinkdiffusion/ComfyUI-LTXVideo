@@ -40,6 +40,18 @@ from .nodes_registry import comfy_node
 
 logger = logging.getLogger("LTXVideo.hdr_nodes")
 
+
+def _strip_floyo_output_prefix(path: str) -> str:
+    """Drop a Floyo ``#outputs`` prefix, including the dispatcher's ``output/`` rewrite."""
+    relative = path.replace("\\", "/").strip().strip("/")
+    for prefix in ("(as-input)#outputs", "#outputs", "output"):
+        if relative == prefix:
+            return ""
+        lead = prefix + "/"
+        if relative.startswith(lead):
+            return relative[len(lead):]
+    return relative
+
 _EXR_COLOR_SPACE_CHOICES = ["linear", "acescct", "srgb_linear", "acescg"]
 _SDR_COLOR_SPACE_CHOICES = [c.value for c in SDRColorSpace]
 _COLOR_SPACE_CHOICES = [c.value for c in HDRColorSpace]
@@ -285,10 +297,11 @@ class LTXVHDRDecodePostprocess:
                 "output_dir": (
                     "STRING",
                     {
-                        "default": "output/hdr_exr",
+                        "default": "#outputs/hdr_exr",
                         "tooltip": (
-                            "Directory for EXR frames (relative to ComfyUI "
-                            "output directory, or absolute path)."
+                            "Directory for EXR frames. #outputs is the ComfyUI "
+                            "output folder (for example #outputs/hdr_exr). "
+                            "Absolute paths are used as given."
                         ),
                     },
                 ),
@@ -327,7 +340,7 @@ class LTXVHDRDecodePostprocess:
         exposure: float = 0.0,
         save_exr: bool = False,
         exr_color_space: str = "acescct",
-        output_dir: str = "output/hdr_exr",
+        output_dir: str = "#outputs/hdr_exr",
         filename_prefix: str = "frame",
         half_precision: bool = True,
     ) -> tuple:
@@ -345,7 +358,7 @@ class LTXVHDRDecodePostprocess:
             frames, primaries, tag = _exr_payload_for_color_space(
                 image, hdr, transfer, exr_color_space
             )
-            self._save_exr_frames_tagged(
+            saved_dir, filenames = self._save_exr_frames_tagged(
                 frames,
                 output_dir,
                 filename_prefix,
@@ -353,6 +366,9 @@ class LTXVHDRDecodePostprocess:
                 primaries=primaries,
                 color_space_tag=tag,
             )
+            files = self._floyo_output_files(saved_dir, filenames)
+            if files:
+                return {"ui": {"files": files}, "result": (tonemapped, hdr)}
 
         return (tonemapped, hdr)
 
@@ -361,7 +377,13 @@ class LTXVHDRDecodePostprocess:
         import folder_paths
 
         if not os.path.isabs(output_dir):
-            output_dir = os.path.join(folder_paths.get_output_directory(), output_dir)
+            # Floyo stores outputs under #outputs. The dispatcher rewrites that
+            # prefix to "output/" before execution, and this node also joins with
+            # the Comfy output directory — strip the prefix so #outputs/ankur
+            # lands in <output>/ankur, not <output>/output/ankur.
+            relative = _strip_floyo_output_prefix(output_dir)
+            base = folder_paths.get_output_directory()
+            output_dir = os.path.join(base, relative) if relative else base
         os.makedirs(output_dir, exist_ok=True)
         return output_dir
 
@@ -375,23 +397,71 @@ class LTXVHDRDecodePostprocess:
         *,
         primaries: Primaries | None,
         color_space_tag: str | None,
-    ) -> None:
+    ) -> tuple[str, list[str]]:
         output_dir = cls._resolve_exr_dir(output_dir)
+        # Same counter as LTXVSaveHLG, so each run gets a new name and Floyo uploads it.
+        full_output_folder, stem, counter, _subfolder, _ = folder_paths.get_save_image_path(
+            filename_prefix or "frame",
+            output_dir,
+        )
+        filenames = []
         for i, frame in enumerate(frames):
+            filename = f"{stem}_{counter + i:05d}.exr"
             _save_exr_frame(
                 frame,
-                Path(output_dir) / f"{filename_prefix}_{i:05d}.exr",
+                Path(full_output_folder) / filename,
                 half_precision=half_precision,
                 primaries=primaries,
                 color_space_tag=color_space_tag,
             )
+            filenames.append(filename)
+        floyo_dir = cls._floyo_output_dir(full_output_folder) or full_output_folder
+        floyo_path = floyo_dir if len(filenames) != 1 else f"{floyo_dir}/{filenames[0]}"
         logger.info(
             "Saved %d EXR frame(s) to %s (%s%s)",
             frames.shape[0],
-            output_dir,
+            floyo_path,
             "float16" if half_precision else "float32",
             f", {color_space_tag}" if color_space_tag else ", untagged linear",
         )
+        return full_output_folder, filenames
+
+    @staticmethod
+    def _floyo_output_dir(output_dir: str) -> str | None:
+        """Floyo path for a directory inside the Comfy output folder."""
+        import folder_paths
+
+        base = os.path.realpath(folder_paths.get_output_directory())
+        target = os.path.realpath(output_dir)
+        try:
+            if os.path.commonpath((base, target)) != base:
+                return None
+        except ValueError:
+            return None
+        relative = os.path.relpath(target, base)
+        if relative == ".":
+            return "#outputs"
+        return "#outputs/" + relative.replace(os.sep, "/")
+
+    @classmethod
+    def _floyo_output_files(cls, output_dir: str, filenames: list[str]) -> list[dict]:
+        """File records Floyo uploads from an executed node.
+
+        ``type`` is ``output`` because that is the Comfy folder Floyo maps to
+        ``#outputs``. Without these records the local files are deleted at the
+        end of the run and never show up in Floyo.
+        """
+        if cls._floyo_output_dir(output_dir) is None:
+            return []
+        import folder_paths
+
+        base = os.path.realpath(folder_paths.get_output_directory())
+        relative = os.path.relpath(os.path.realpath(output_dir), base)
+        subfolder = "" if relative == "." else relative.replace(os.sep, "/")
+        return [
+            {"filename": filename, "subfolder": subfolder, "type": "output"}
+            for filename in filenames
+        ]
 
 
 @comfy_node(name="LTXVLoadEXRSequence")
@@ -586,7 +656,16 @@ class LTXVSaveHLG:
                     "FLOAT",
                     {"default": 24.0, "min": 1.0, "max": 120.0, "step": 0.001},
                 ),
-                "filename_prefix": ("STRING", {"default": "hdr/ltxv_hlg"}),
+                "filename_prefix": (
+                    "STRING",
+                    {
+                        "default": "#outputs/hdr/ltxv_hlg",
+                        "tooltip": (
+                            "File prefix under #outputs, Floyo's output folder. "
+                            "Example: #outputs/hdr/ltxv_hlg."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 "linear_primaries": (
@@ -651,15 +730,17 @@ class LTXVSaveHLG:
         if h % 2 or w % 2:
             linear = linear[:, : h - (h % 2), : w - (w % 2), :]
 
-        full_output_folder, filename, counter, _subfolder, _ = (
+        prefix = _strip_floyo_output_prefix(filename_prefix) or "ltxv_hlg"
+        full_output_folder, filename, counter, subfolder, _ = (
             folder_paths.get_save_image_path(
-                filename_prefix,
+                prefix,
                 folder_paths.get_output_directory(),
                 linear.shape[2],
                 linear.shape[1],
             )
         )
-        hlg_path = Path(full_output_folder) / f"{filename}_{counter:05d}_hlg.mp4"
+        file = f"{filename}_{counter:05d}_hlg.mp4"
+        hlg_path = Path(full_output_folder) / file
         _encode_hlg_mp4(
             linear,
             hlg_path,
@@ -667,9 +748,12 @@ class LTXVSaveHLG:
             audio=audio,
             primaries=src_primaries,
         )
+        subfolder = subfolder.replace(os.sep, "/")
+        floyo_path = "#outputs/" + "/".join(part for part in (subfolder, file) if part)
         logger.info(
             "Wrote HLG 10-bit master to %s%s",
-            hlg_path,
+            floyo_path,
             " (with audio)" if audio is not None else "",
         )
-        return {}
+        record = {"filename": file, "subfolder": subfolder, "type": "output"}
+        return {"ui": {"files": [record], "images": [record], "animated": (True,)}}
